@@ -1,7 +1,7 @@
-# scripts/update_omie_pt.py
 import os
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 import requests
 
@@ -9,100 +9,16 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "public", "omie")
 INDEX_FILE = os.path.join(OUTPUT_DIR, "index.json")
 
-OMIE_DOWNLOAD_URL = "https://www.omie.es/es/file-download"
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-def format_ymd(date_obj):
-    return date_obj.strftime("%Y%m%d")
 
 
 def iso_day(date_obj):
     return date_obj.strftime("%Y-%m-%d")
 
 
-def download_omie_text(date_obj):
-    ymd = format_ymd(date_obj)
-    filename = f"marginalpdbcpt_{ymd}.1"
-
-    params = {
-        "filename": filename,
-        "parents": "marginalpdbcpt",
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/plain,*/*",
-    }
-
-    response = requests.get(OMIE_DOWNLOAD_URL, params=params, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    text = response.text.strip()
-    if not text:
-        raise ValueError(f"Ficheiro OMIE vazio para {ymd}")
-
-    return filename, text
-
-
-def parse_omie_text(text, date_obj):
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    rows = []
-
-    for line in lines:
-        lower = line.lower()
-
-        if (
-            lower.startswith("*")
-            or lower.startswith("#")
-            or "fecha" in lower
-            or "date" in lower
-            or "portugal" in lower
-            or "precio" in lower
-            or "price" in lower
-        ):
-            continue
-
-        parts = re.split(r"[;\t,]+", line)
-        parts = [p.strip() for p in parts if p.strip()]
-
-        numeric = []
-        for p in parts:
-            p_norm = p.replace(",", ".")
-            try:
-                numeric.append(float(p_norm))
-            except ValueError:
-                pass
-
-        if len(numeric) < 2:
-            continue
-
-        hour = int(numeric[0])
-        price = float(numeric[-1])
-
-        if hour < 1 or hour > 25:
-            continue
-
-        dt = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=timezone.utc)
-        dt = dt + timedelta(hours=hour - 1)
-
-        rows.append({
-            "x": int(dt.timestamp() * 1000),
-            "hour": hour,
-            "price": price
-        })
-
-    if not rows:
-        raise ValueError(f"Não foi possível fazer parse do ficheiro para {iso_day(date_obj)}")
-
-    return rows
-
-
 def load_index():
     if not os.path.exists(INDEX_FILE):
         return {"days": []}
-
     with open(INDEX_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -112,53 +28,138 @@ def save_index(index_data):
         json.dump(index_data, f, ensure_ascii=False, indent=2)
 
 
-def save_day_json(date_obj, rows):
-    day_str = iso_day(date_obj)
-    out_path = os.path.join(OUTPUT_DIR, f"{day_str}.json")
+def download_omie_text(date_obj):
+    ymd = date_obj.strftime("%Y%m%d")
+    filename = f"marginalpdbcpt_{ymd}.1"
+    url = f"https://www.omie.es/es/file-download?filename={filename}&parents=marginalpdbcpt"
 
-    payload = {
-        "date": day_str,
-        "market": "OMIE Portugal day-ahead",
-        "rows": rows
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
     }
 
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    response = requests.get(url, headers=headers, timeout=30)
 
-    return out_path
+    if response.status_code != 200:
+        raise Exception(f"HTTP {response.status_code}")
+
+    text = response.text.strip()
+
+    if not text or len(text) < 50:
+        raise Exception("Conteúdo OMIE vazio ou inválido")
+
+    return text
 
 
-def ensure_days(days_back=120):
-    index_data = load_index()
-    existing_days = set(index_data.get("days", []))
+def parse_omie(text, date_obj):
+    rows = []
 
-    today = datetime.utcnow().date()
-    updated_days = set(existing_days)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
 
-    for offset in range(days_back):
-        day = today - timedelta(days=offset)
-        day_dt = datetime(day.year, day.month, day.day)
+        lower = line.lower()
+        if (
+            lower.startswith("*")
+            or lower.startswith("#")
+            or "date" in lower
+            or "fecha" in lower
+            or "precio" in lower
+            or "price" in lower
+            or "portugal" in lower
+        ):
+            continue
 
-        day_str = iso_day(day_dt)
+        parts = re.split(r"[;\t,]+", line)
+        nums = []
+
+        for p in parts:
+            try:
+                nums.append(float(p.replace(",", ".")))
+            except Exception:
+                pass
+
+        if len(nums) < 2:
+            continue
+
+        hour = int(nums[0])
+        price = nums[-1]
+
+        if hour < 1 or hour > 25:
+            continue
+
+        dt = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=timezone.utc)
+        dt += timedelta(hours=hour - 1)
+
+        rows.append({
+            "x": int(dt.timestamp() * 1000),
+            "price": price
+        })
+
+    if not rows:
+        raise Exception("Sem linhas válidas após parse")
+
+    return rows
+
+
+def ensure_range(start_date, end_date):
+    index = load_index()
+    existing = set(index.get("days", []))
+    updated = set(existing)
+
+    current = start_date
+
+    while current <= end_date:
+        day_str = iso_day(current)
         out_path = os.path.join(OUTPUT_DIR, f"{day_str}.json")
 
         if os.path.exists(out_path):
-            updated_days.add(day_str)
+            updated.add(day_str)
+            current += timedelta(days=1)
             continue
 
         try:
-            filename, text = download_omie_text(day_dt)
-            rows = parse_omie_text(text, day_dt)
-            save_day_json(day_dt, rows)
-            updated_days.add(day_str)
-            print(f"OK {filename}")
+            text = download_omie_text(current)
+            rows = parse_omie(text, current)
+
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "date": day_str,
+                        "market": "OMIE Portugal day-ahead",
+                        "rows": rows
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+
+            updated.add(day_str)
+            print(f"OK {day_str}")
+            time.sleep(0.5)
+
         except Exception as e:
             print(f"SKIP {day_str}: {e}")
 
-    final_days = sorted(updated_days)
-    save_index({"days": final_days})
-    print(f"Index atualizado com {len(final_days)} dias")
+        current += timedelta(days=1)
+
+    save_index({"days": sorted(updated)})
 
 
 if __name__ == "__main__":
-    ensure_days(days_back=120)
+    start = os.getenv("START_DATE")
+    end = os.getenv("END_DATE")
+
+    if start and end:
+        start_date = datetime.fromisoformat(start)
+        end_date = datetime.fromisoformat(end)
+        ensure_range(start_date, end_date)
+    else:
+        today = datetime.utcnow().date()
+        start_date = today - timedelta(days=7)
+        ensure_range(
+            datetime(start_date.year, start_date.month, start_date.day),
+            datetime(today.year, today.month, today.day),
+        )
