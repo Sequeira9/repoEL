@@ -1,10 +1,14 @@
-# .github/workflows/update-omie.yml
 name: Update OMIE Portugal prices
 
 on:
-  schedule:
-    - cron: "20 15 * * *"
   workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYY-MM-DD)"
+        required: true
+      end:
+        description: "End date (YYYY-MM-DD)"
+        required: true
 
 permissions:
   contents: write
@@ -22,11 +26,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: pip install requests
 
       - name: Run OMIE updater
         run: python scripts/update_omie_pt.py
+        env:
+          START_DATE: ${{ github.event.inputs.start }}
+          END_DATE: ${{ github.event.inputs.end }}
 
       - name: Commit changes
         run: |
