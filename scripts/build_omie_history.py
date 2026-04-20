@@ -46,53 +46,48 @@ def save_day_json(date_obj, rows):
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+# 🔥 PARSER FINAL (SUPORTA 24h + 15min)
 def parse_omie_text(text, date_obj):
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
     rows = []
 
-    for line in lines:
-        lower = line.lower()
-        if (
-            lower.startswith("*")
-            or lower.startswith("#")
-            or "fecha" in lower
-            or "date" in lower
-            or "precio" in lower
-            or "price" in lower
-            or "portugal" in lower
-        ):
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line or line.startswith("*") or line.startswith("MARGINAL"):
             continue
 
-        parts = re.split(r"[;\t,]+", line)
-        parts = [p.strip() for p in parts if p.strip()]
+        parts = line.split(";")
 
-        numeric = []
-        for p in parts:
-            try:
-                numeric.append(float(p.replace(",", ".")))
-            except ValueError:
-                pass
-
-        if len(numeric) < 2:
+        if len(parts) < 6:
             continue
 
-        hour = int(numeric[0])
-        price = float(numeric[-1])
-
-        if hour < 1 or hour > 25:
+        try:
+            year = int(parts[0])
+            month = int(parts[1])
+            day = int(parts[2])
+            index = int(parts[3])
+            price = float(parts[-2].replace(",", "."))
+        except:
             continue
 
-        dt = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=timezone.utc)
-        dt += timedelta(hours=hour - 1)
+        # FORMATO ANTIGO (horas)
+        if index <= 25:
+            dt = datetime(year, month, day, tzinfo=timezone.utc)
+            dt += timedelta(hours=index - 1)
+
+        # FORMATO NOVO (15 min)
+        else:
+            dt = datetime(year, month, day, tzinfo=timezone.utc)
+            dt += timedelta(minutes=(index - 1) * 15)
 
         rows.append({
             "x": int(dt.timestamp() * 1000),
-            "hour": hour,
             "price": price
         })
 
     if not rows:
-        raise ValueError(f"Sem dados válidos para {iso_day(date_obj)}")
+        print(f"SKIP (sem dados): {iso_day(date_obj)}")
+        return []
 
     return rows
 
@@ -104,8 +99,6 @@ def download_file(filename):
     }
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Connection": "keep-alive",
     }
 
     res = requests.get(DOWNLOAD_URL, params=params, headers=headers, timeout=60)
@@ -122,26 +115,38 @@ def ensure_daily_file(date_obj, known_days):
         return
 
     filename = f"marginalpdbcpt_{ymd(date_obj)}.1"
-    raw = download_file(filename)
-    text = raw.decode("latin-1", errors="ignore")
-    rows = parse_omie_text(text, date_obj)
-    save_day_json(date_obj, rows)
-    known_days.add(day_str)
-    print(f"OK daily {filename}")
+
+    try:
+        raw = download_file(filename)
+        text = raw.decode("latin-1", errors="ignore")
+        rows = parse_omie_text(text, date_obj)
+
+        if rows:
+            save_day_json(date_obj, rows)
+            known_days.add(day_str)
+            print(f"OK daily {filename}")
+        else:
+            print(f"SKIP daily {filename}")
+
+    except Exception as e:
+        print(f"ERRO daily {filename}: {e}")
 
 
 def build_year_from_zip(year, known_days):
     zip_name = f"marginalpdbcpt_{year}.zip"
-    raw = download_file(zip_name)
+
+    try:
+        raw = download_file(zip_name)
+    except:
+        print(f"SKIP zip {zip_name}")
+        return
 
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
         members = [m for m in zf.namelist() if m.lower().endswith(".1")]
 
-        if not members:
-            raise ValueError(f"{zip_name} sem ficheiros .1")
-
         for member in members:
             base = os.path.basename(member)
+
             m = re.search(r"marginalpdbcpt_(\d{8})\.1$", base, re.IGNORECASE)
             if not m:
                 continue
@@ -154,10 +159,18 @@ def build_year_from_zip(year, known_days):
                 known_days.add(day_str)
                 continue
 
-            text = zf.read(member).decode("latin-1", errors="ignore")
-            rows = parse_omie_text(text, date_obj)
-            save_day_json(date_obj, rows)
-            known_days.add(day_str)
+            try:
+                text = zf.read(member).decode("latin-1", errors="ignore")
+                rows = parse_omie_text(text, date_obj)
+
+                if rows:
+                    save_day_json(date_obj, rows)
+                    known_days.add(day_str)
+                else:
+                    print(f"SKIP zip day {day_str}")
+
+            except Exception as e:
+                print(f"ERRO zip {day_str}: {e}")
 
         print(f"OK zip {zip_name}")
 
@@ -190,4 +203,5 @@ if __name__ == "__main__":
 
     start_date = datetime.fromisoformat(start)
     end_date = datetime.fromisoformat(end)
+
     build_range(start_date, end_date)
