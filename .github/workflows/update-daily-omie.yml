@@ -1,14 +1,9 @@
-name: Update OMIE Portugal prices
+name: Daily OMIE update
 
 on:
+  schedule:
+    - cron: "0 14,15,16,17,18 * * *"
   workflow_dispatch:
-    inputs:
-      start:
-        description: "Start date (YYYY-MM-DD)"
-        required: true
-      end:
-        description: "End date (YYYY-MM-DD)"
-        required: true
 
 permissions:
   contents: write
@@ -29,16 +24,13 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run OMIE updater
-        run: python scripts/update_omie_pt.py
-        env:
-          START_DATE: ${{ github.event.inputs.start }}
-          END_DATE: ${{ github.event.inputs.end }}
+      - name: Update next OMIE day
+        run: python scripts/update_daily_omie.py
 
       - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add public/omie
-          git diff --cached --quiet || git commit -m "chore: update OMIE Portugal prices"
+          git diff --cached --quiet || git commit -m "chore: daily OMIE update"
           git push
